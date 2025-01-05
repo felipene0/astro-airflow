@@ -1,0 +1,6 @@
+project:
+    name: astrodev
+
+services:
+  postgres:
+    port: 5433
