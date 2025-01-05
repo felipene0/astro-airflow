@@ -1,3 +1,16 @@
+"""
+
+- Imports
+- Connections & Variables
+- Datasets
+- Default Arguments
+- DAG Definition
+- Task Declaration
+- Task Dependencies
+- DAG Instantiation
+
+"""
+
 import requests
 import logging
 import pandas as pd
