@@ -17,14 +17,15 @@ import os
 import requests
 import logging
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 from airflow.decorators import dag, task, task_group
+from airflow.operators.empty import EmptyOperator
 from dateutil.relativedelta import relativedelta
 from google.cloud import storage
 
 API = "https://data.cityofnewyork.us/resource/h9gi-nx95.json?$limit={limit}&$offset={offset}&$where=crash_date>='{date_filter}'&borough={borough}"
 BOROUGH_LIST = ['BROOKLYN', 'QUEENS']
-DATE_FILTER = (datetime.now() - relativedelta(weeks=10)).strftime("%Y-%m-%d")
+DATE_FILTER = (datetime.now() - relativedelta(weeks=30)).strftime("%Y-%m-%d")
 LIMIT = 50000
 GCS_BUCKET_NAME = os.getenv('GCS_BUCKET_NAME')
 GCS_OUTPUT_FOLDER = os.getenv('GCS_OUTPUT_FOLDER')
@@ -38,6 +39,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
     catchup=False
 )
 def main():
+
+    start = EmptyOperator(task_id="start")
+    end = EmptyOperator(task_id="end", trigger_rule="none_failed_min_one_success")
 
     @task_group(group_id="data_processing")
     def data_processing():
@@ -73,6 +77,26 @@ def main():
             logging.info(f"Saved {borough} into a DataFrame with shape {df.shape} in {local_file}")
             
             return local_file
+        
+        #Only pass archives that are bigger than 1MB for any reason...
+        @task.branch(task_id='branching')
+        def checker(file_path: list):
+            valid_files = []
+            for file in file_path:
+                size = os.path.getsize(file)
+                
+                logging.info(f"File {file} has size of {size} bytes")
+                if size < 1000000:
+                    logging.info(f"Removing file {file}")
+                    os.remove(file)
+                else:
+                    valid_files.append(file)
+
+            if valid_files:
+                logging.info('There are no files above 1MB to be ingested')
+                return ['end']
+
+            return valid_files
 
         @task
         def combine_files(file_path: list) -> pd.DataFrame:
@@ -90,8 +114,14 @@ def main():
         
         #Group Depedencies
         file_paths = fetch_data_dtm.expand(borough=BOROUGH_LIST)
-        combined_data = combine_files(file_paths)
+        checker = checker(file_paths)
+        combined_data = combine_files(checker)
+        
+        file_paths >> checker 
+        checker >> end #Branch to skip upload data
+        checker >> combined_data
 
+        
         return combined_data
             
     @task
@@ -108,6 +138,8 @@ def main():
         os.remove(file_path)
 
     final_data = data_processing()
-    upload_gcs(final_data)
-
+    upload = upload_gcs(final_data)
+    
+    # TODO step start is pointing directly to combine_files, not sure why
+    start >> final_data >> upload >> end
 main()

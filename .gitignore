@@ -11,3 +11,6 @@ airflow.cfg
 airflow.db
 application_default_credentials_2.json
 google-cloud*
+docker-compose.override.yml
+hadoop*
+spark*
