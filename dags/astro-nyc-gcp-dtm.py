@@ -78,7 +78,7 @@ def main():
             
             return local_file
         
-        #Only pass archives that are bigger than 1MB for any reason...
+        # Only pass files that are bigger than 1MB for any reason...
         @task.branch(task_id='branching')
         def checker(file_path: list):
             valid_files = []
@@ -112,13 +112,13 @@ def main():
 
             return combined_local_file
         
-        #Group Depedencies
+        # Group Depedencies
         file_paths = fetch_data_dtm.expand(borough=BOROUGH_LIST)
         checker = checker(file_paths)
         combined_data = combine_files(checker)
         
         file_paths >> checker 
-        checker >> end #Branch to skip upload data
+        checker >> end # Branch to skip upload data
         checker >> combined_data
 
         
@@ -140,6 +140,6 @@ def main():
     final_data = data_processing()
     upload = upload_gcs(final_data)
     
-    # TODO step start is pointing directly to combine_files, not sure why
+    # TODO step 'start' is pointing directly to combine_files, not sure why
     start >> final_data >> upload >> end
 main()
