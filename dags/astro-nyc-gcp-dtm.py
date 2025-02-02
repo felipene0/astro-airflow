@@ -20,6 +20,7 @@ import pandas as pd
 from datetime import datetime
 from airflow.decorators import dag, task, task_group
 from airflow.operators.empty import EmptyOperator
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from dateutil.relativedelta import relativedelta
 from google.cloud import storage
 
@@ -146,9 +147,15 @@ def main():
         # Clean up local file
         os.remove(file_path)
 
+    trigger_dag_2 = TriggerDagRunOperator(
+        task_id="trigger_dag_2",
+        trigger_dag_id="astro-nyc-gcp-read",  # Name of the DAG to trigger
+        wait_for_completion=True  # If True, it waits for DAG 2 to finish before continuing
+    )
+
     final_data = data_processing()
     upload = upload_gcs(final_data)
     
     # TODO step 'start' is pointing directly to combine_files, not sure why
-    start >> final_data >> upload >> end
+    start >> final_data >> upload >> trigger_dag_2 >> end
 main()
