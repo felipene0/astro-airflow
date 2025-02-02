@@ -25,10 +25,11 @@ from google.cloud import storage
 
 API = "https://data.cityofnewyork.us/resource/h9gi-nx95.json?$limit={limit}&$offset={offset}&$where=crash_date>='{date_filter}'&borough={borough}"
 BOROUGH_LIST = ['BROOKLYN', 'QUEENS']
-DATE_FILTER = (datetime.now() - relativedelta(weeks=30)).strftime("%Y-%m-%d")
+DATE_FILTER = (datetime.now() - relativedelta(months=12)).strftime("%Y-%m-%d")
 LIMIT = 50000
 GCS_BUCKET_NAME = os.getenv('GCS_BUCKET_NAME')
 GCS_OUTPUT_FOLDER = os.getenv('GCS_OUTPUT_FOLDER')
+FILE_SIZE_THRESHOLD = 500000  # 500KB
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
@@ -53,20 +54,20 @@ def main():
             
             try:
                 while True:
-                        api_url = API.format(limit=LIMIT, offset=offset, date_filter=DATE_FILTER, borough=borough)
-                        response = requests.get(api_url, timeout=20)
-                        response.raise_for_status()
+                    api_url = API.format(limit=LIMIT, offset=offset, date_filter=DATE_FILTER, borough=borough)
+                    response = requests.get(api_url, timeout=20)
+                    response.raise_for_status()
 
-                        data = response.json()
+                    data = response.json()
 
-                        logging.info(f"Fetched {len(data)} rows starting from offset {offset}")
-                        all_data.extend(data)
+                    logging.info(f"Fetched {len(data)} rows starting from offset {offset}")
+                    all_data.extend(data)
 
-                        # Break the loop if no more data is fetched
-                        if len(data) < 1:
-                            break
+                    # Break the loop if no more data is fetched
+                    if len(data) < 1:
+                        break
 
-                        offset += LIMIT
+                    offset += LIMIT
             except requests.exceptions.RequestException as e:
                 logging.error(f"Failed to fetch data for {borough}: {e}")
                 raise
@@ -75,65 +76,68 @@ def main():
             local_file = f"/tmp/{borough}_crash_data.parquet"
             df.to_parquet(local_file, engine="pyarrow", index=False)
             logging.info(f"Saved {borough} into a DataFrame with shape {df.shape} in {local_file}")
-            
             return local_file
         
-        # Only pass files that are bigger than 1MB for any reason...
+        # Only pass files that are bigger than 500KB for any reason...
         @task.branch(task_id='branching')
-        def checker(file_path: list):
+        def checker(file_paths: list) -> list:
             valid_files = []
-            for file in file_path:
-                size = os.path.getsize(file)
-                
-                logging.info(f"File {file} has size of {size} bytes")
-                if size < 1000000:
-                    logging.info(f"Removing file {file}")
-                    os.remove(file)
-                else:
-                    valid_files.append(file)
+            for file in file_paths:
+                try:
+                    size = os.path.getsize(file)
+                    logging.info(f"File {file} has size of {size} bytes")
 
-            if valid_files:
-                logging.info('There are no files above 1MB to be ingested')
-                return ['end']
+                    if size < FILE_SIZE_THRESHOLD:
+                        logging.info(f"Removing file {file}")
+                        os.remove(file)
+                    else:
+                        valid_files.append(file)
+                except Exception as e:
+                    logging.error(f"Error processing file {file}: {e}")
 
-            return valid_files
+            if not valid_files:
+                logging.info('No files above 500kb to be ingested')
+                return "end"
+            
+            logging.info("Branching to combine_files.")
+            return "data_processing.combine_files"
 
-        @task
+        @task(task_id="combine_files")
         def combine_files(file_path: list) -> pd.DataFrame:
             combined_df = pd.DataFrame()
 
             for file in file_path:
-                df = pd.read_parquet(file)
-                combined_df = pd.concat([combined_df, df], ignore_index=True)
+                try:
+                    df = pd.read_parquet(file)
+                    combined_df = pd.concat([combined_df, df], ignore_index=True)
+                except Exception as e:
+                    logging.error(f"Erroe reading file {file}: {e}")
 
             combined_local_file = "/tmp/crash_data.parquet"
             combined_df.to_parquet(combined_local_file, engine="pyarrow", index=False)
             logging.info(f"Saved combined Dataframe to {combined_local_file}")
-
             return combined_local_file
-        
+
         # Group Depedencies
         file_paths = fetch_data_dtm.expand(borough=BOROUGH_LIST)
-        checker = checker(file_paths)
-        combined_data = combine_files(checker)
+        valid_files = checker(file_paths)
+        combined_data = combine_files(valid_files)
         
-        file_paths >> checker 
-        checker >> end # Branch to skip upload data
-        checker >> combined_data
+        valid_files >> [combined_data, end]
 
-        
         return combined_data
             
     @task
     def upload_gcs(file_path: list):
-        client = storage.Client()
-
-        bucket = client.bucket(GCS_BUCKET_NAME)
-        blob = bucket.blob(f"{GCS_OUTPUT_FOLDER}crash_data.parquet")
-        blob.upload_from_filename(file_path)
-
-        logging.info(f"Uploaded {file_path} to GCS at {GCS_OUTPUT_FOLDER} as {blob}")
-        
+        try:
+            client = storage.Client()
+            bucket = client.bucket(GCS_BUCKET_NAME)
+            blob = bucket.blob(f"{GCS_OUTPUT_FOLDER}crash_data.parquet")
+            blob.upload_from_filename(file_path)
+            logging.info(f"Uploaded {file_path} to GCS at {GCS_OUTPUT_FOLDER} as {blob}")
+        except Exception as e:
+            logging.error(f"Error uploading file to GCS: {e}")
+            
         # Clean up local file
         os.remove(file_path)
 

@@ -2,4 +2,5 @@ version: "3.1"
 services:
   scheduler:
     volumes:
-      - ${GOOGLE_APPLICATION_CREDENTIALS}:${GOOGLE_APPLICATION_CREDENTIALS}
+      # - ${GOOGLE_APPLICATION_CREDENTIALS}:${GOOGLE_APPLICATION_CREDENTIALS}
+      - /home/fepipe/astrodev/application_default_credentials_2.json:/home/fepipe/astrodev/application_default_credentials_2.json
