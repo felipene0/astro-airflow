@@ -24,12 +24,12 @@ from dateutil.relativedelta import relativedelta
 from google.cloud import storage
 
 API = "https://data.cityofnewyork.us/resource/h9gi-nx95.json?$limit={limit}&$offset={offset}&$where=crash_date>='{date_filter}'&borough={borough}"
-BOROUGH_LIST = ['BROOKLYN', 'QUEENS']
+BOROUGH_LIST = ['BROOKLYN', 'QUEENS', 'BRONX', 'MANHATTAN', 'STATEN ISLAND']
 DATE_FILTER = (datetime.now() - relativedelta(months=12)).strftime("%Y-%m-%d")
 LIMIT = 50000
 GCS_BUCKET_NAME = os.getenv('GCS_BUCKET_NAME')
 GCS_OUTPUT_FOLDER = os.getenv('GCS_OUTPUT_FOLDER')
-FILE_SIZE_THRESHOLD = 500000  # 500KB
+FILE_SIZE_THRESHOLD = 100000  # 500KB
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
@@ -78,8 +78,8 @@ def main():
             logging.info(f"Saved {borough} into a DataFrame with shape {df.shape} in {local_file}")
             return local_file
         
-        # Only pass files that are bigger than 500KB for any reason...
-        @task.branch(task_id='branching')
+        # Only pass files that are bigger than FILE_SIZE_THRESHOLD for any reason...
+        @task(task_id="checker")
         def checker(file_paths: list) -> list:
             valid_files = []
             for file in file_paths:
@@ -96,22 +96,26 @@ def main():
                     logging.error(f"Error processing file {file}: {e}")
 
             if not valid_files:
-                logging.info('No files above 500kb to be ingested')
+                logging.info(f'No files above {FILE_SIZE_THRESHOLD} bytes to be ingested')
+            return valid_files
+        
+        @task.branch(task_id="branching")
+        def branch_valid_files(valid_files: list) -> str:
+            if not valid_files:
                 return "end"
-            
-            logging.info("Branching to combine_files.")
             return "data_processing.combine_files"
 
         @task(task_id="combine_files")
-        def combine_files(file_path: list) -> pd.DataFrame:
+        def combine_files(file_path: list) -> str:
             combined_df = pd.DataFrame()
 
             for file in file_path:
                 try:
+                    logging.error(f"Nome do arquivo: {file}")
                     df = pd.read_parquet(file)
                     combined_df = pd.concat([combined_df, df], ignore_index=True)
                 except Exception as e:
-                    logging.error(f"Erroe reading file {file}: {e}")
+                    logging.error(f"Error reading file {file}: {e}")
 
             combined_local_file = "/tmp/crash_data.parquet"
             combined_df.to_parquet(combined_local_file, engine="pyarrow", index=False)
@@ -121,9 +125,10 @@ def main():
         # Group Depedencies
         file_paths = fetch_data_dtm.expand(borough=BOROUGH_LIST)
         valid_files = checker(file_paths)
+        branch = branch_valid_files(valid_files)
         combined_data = combine_files(valid_files)
         
-        valid_files >> [combined_data, end]
+        branch >> [combined_data, end]
 
         return combined_data
             
